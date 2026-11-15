@@ -1,4 +1,4 @@
-import os, re, html, base64, hashlib, hmac, subprocess, urllib.parse
+import os, re, html, json, base64, hashlib, hmac, subprocess, urllib.parse
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -7,26 +7,27 @@ from urllib.parse import parse_qs
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONF_PATH = os.path.join(BASE_DIR, "marquee.conf")
 HOST_CONF_PATH = os.path.join(BASE_DIR, "host.conf")
+SCORES_PATH = os.path.join(BASE_DIR, "highscores.json")
 MEDIA_DIR = os.path.join(BASE_DIR, "marquees")
 ACTIVE_IMG = "/dev/shm/marquee_display.png"
 MAX_UPLOAD_BYTES = 150 * 1024 * 1024
 
-def read_conf():
+def read_kv(path):
     cfg = {}
-    if os.path.exists(CONF_PATH):
-        with open(CONF_PATH) as f:
+    if os.path.exists(path):
+        with open(path) as f:
             for line in f:
                 if "=" in line and not line.strip().startswith("#"):
                     k, v = line.strip().split("=", 1)
                     cfg[k] = v.strip('"')
     return cfg
 
-def write_conf(cfg):
-    with open(CONF_PATH, "w") as f:
+def write_kv(path, cfg):
+    with open(path, "w") as f:
         for k, v in cfg.items():
             safe_val = str(v).replace('"', "").replace("\n", "").replace("\r", "")
             f.write(f'{k}="{safe_val}"\n')
-    os.chmod(CONF_PATH, 0o600)
+    os.chmod(path, 0o600)
 
 def sanitize_name(name):
     cleaned = re.sub(r"[^a-zA-Z0-9._ -]", "", os.path.basename(name.strip()))
@@ -63,7 +64,8 @@ class MarqueeHandler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        cfg = read_conf()
+        cfg = read_kv(CONF_PATH)
+        hcfg = read_kv(HOST_CONF_PATH)
         if not self.require_auth(cfg):
             return
         parsed = urllib.parse.urlparse(self.path)
@@ -90,7 +92,7 @@ class MarqueeHandler(BaseHTTPRequestHandler):
 
         if path_clean == "/text":
             cfg["OVERLAY_TEXT"] = first_param(qp, "t")[:120]
-            write_conf(cfg)
+            write_kv(CONF_PATH, cfg)
             open("/dev/shm/marquee_force_refresh", "w").close()
             self.send_response(200)
             self.send_header("Content-type", "application/json")
@@ -119,6 +121,11 @@ class MarqueeHandler(BaseHTTPRequestHandler):
             "button{background:#2563eb;color:#fff;border:0;padding:8px 12px;border-radius:4px;cursor:pointer;margin-right:6px}</style></head><body>"
             f"<h2>Arcade Marquee ({html.escape(cfg.get('MARQUEE_MODE','native').upper())})</h2>{msg}"
             f"<div class='c'><img src='/preview.png' style='max-width:100%;max-height:150px'><p>Showing: <b>{now}</b></p></div>"
+            "<div class='c'><h3>Log Manual High Score</h3><form method='POST' action='/hiscore'>"
+            "<input name='system' placeholder='System (e.g. snes, mame, psx)' required>"
+            "<input name='rom' placeholder='Exact ROM name without extension (e.g. dkong)' required>"
+            "<input name='score' placeholder='High Score Text (e.g. 1ST: 125,000 - SMK) — leave blank to clear'>"
+            "<button type='submit'>Save Score</button></form></div>"
             "<div class='c'><h3>Upload Art</h3><form method='POST' action='/upload' enctype='multipart/form-data'>"
             "<select name='category'><option value='startup'>Boot Splash / Fallback</option><option value='systems'>Console Wheel</option>"
             "<option value='game'>Game Marquee</option><option value='controls_sys'>Controls (System)</option><option value='controls_game'>Controls (Game)</option></select>"
@@ -127,6 +134,9 @@ class MarqueeHandler(BaseHTTPRequestHandler):
             "<div class='c'><h3>Settings</h3><form method='POST' action='/config'>"
             f"<label>Mode (native / pixelcade_rx / hybrid)</label><input name='MARQUEE_MODE' value='{html.escape(cfg.get('MARQUEE_MODE','native'))}'>"
             f"<label>Scaling (fit / stretch)</label><input name='SCALE_MODE' value='{html.escape(cfg.get('SCALE_MODE','fit'))}'>"
+            f"<label>Enable High Scores (true / false)</label><input name='ENABLE_HIGHSCORES' value='{html.escape(cfg.get('ENABLE_HIGHSCORES','true'))}'>"
+            f"<label>RetroAchievements Username (Host)</label><input name='RA_USER' value='{html.escape(hcfg.get('RA_USER',''))}'>"
+            f"<label>RetroAchievements Web API Key (Host)</label><input name='RA_API_KEY' value='{html.escape(hcfg.get('RA_API_KEY',''))}'>"
             f"<label>Physical LCD Width (e.g. 1920)</label><input name='PHYS_W' value='{html.escape(cfg.get('PHYS_W',''))}'>"
             f"<label>Physical LCD Height (e.g. 440)</label><input name='PHYS_H' value='{html.escape(cfg.get('PHYS_H',''))}'>"
             f"<label>Host IP</label><input name='HOST_IP' value='{html.escape(cfg.get('HOST_IP',''))}'>"
@@ -144,7 +154,7 @@ class MarqueeHandler(BaseHTTPRequestHandler):
         self.wfile.write(page.encode())
 
     def do_POST(self):
-        cfg = read_conf()
+        cfg = read_kv(CONF_PATH)
         if not self.require_auth(cfg):
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -154,11 +164,39 @@ class MarqueeHandler(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length)
 
-        if self.path == "/config":
+        if self.path == "/hiscore":
             params = parse_qs(body.decode("utf-8", errors="ignore"))
-            for k in ["MARQUEE_MODE", "SCALE_MODE", "PHYS_W", "PHYS_H", "HOST_IP", "PIXELCADE_HW_IP", "SLEEP_START", "SLEEP_END", "OVERLAY_TEXT"]:
+            sys_n = sanitize_name(first_param(params, "system"))
+            rom_n = sanitize_name(first_param(params, "rom"))
+            score_val = first_param(params, "score").strip()[:100]
+            if sys_n and rom_n:
+                scores = {}
+                if os.path.exists(SCORES_PATH):
+                    try:
+                        scores = json.load(open(SCORES_PATH, "r", encoding="utf-8"))
+                    except Exception:
+                        scores = {}
+                key = f"{sys_n}/{rom_n}"
+                if score_val:
+                    scores[key] = score_val
+                else:
+                    scores.pop(key, None)
+                with open(SCORES_PATH, "w", encoding="utf-8") as f:
+                    json.dump(scores, f, indent=2)
+                open("/dev/shm/marquee_force_refresh", "w").close()
+            self.send_response(303)
+            self.send_header("Location", "/?msg=ok")
+            self.end_headers()
+        elif self.path == "/config":
+            params = parse_qs(body.decode("utf-8", errors="ignore"))
+            for k in ["MARQUEE_MODE", "SCALE_MODE", "ENABLE_HIGHSCORES", "PHYS_W", "PHYS_H", "HOST_IP", "PIXELCADE_HW_IP", "SLEEP_START", "SLEEP_END", "OVERLAY_TEXT"]:
                 cfg[k] = first_param(params, k)
-            write_conf(cfg)
+            write_kv(CONF_PATH, cfg)
+            if os.path.exists(HOST_CONF_PATH):
+                hcfg = read_kv(HOST_CONF_PATH)
+                hcfg["RA_USER"] = first_param(params, "RA_USER")
+                hcfg["RA_API_KEY"] = first_param(params, "RA_API_KEY")
+                write_kv(HOST_CONF_PATH, hcfg)
             open("/dev/shm/marquee_force_refresh", "w").close()
             self.send_response(303)
             self.send_header("Location", "/?msg=ok")
@@ -200,6 +238,6 @@ class MarqueeHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 if __name__ == "__main__":
-    cfg = read_conf()
+    cfg = read_kv(CONF_PATH)
     bind_ip = "127.0.0.1" if (cfg.get("CLIENT_MODE") == "local" and not os.path.exists(HOST_CONF_PATH)) else "0.0.0.0"
     ThreadingHTTPServer((bind_ip, 8080), MarqueeHandler).serve_forever()

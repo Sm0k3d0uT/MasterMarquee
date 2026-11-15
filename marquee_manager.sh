@@ -1,9 +1,16 @@
 #!/bin/bash
 
-REPO_RAW_URL="http://192.168.1.169:8000"
+GITHUB_USER="Sm0k3d0uT"
+GITHUB_REPO="MasterMarquee"
+GITHUB_BRANCH="main"
+REPO_RAW_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
+
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+CURL_AUTH=()
+[ -n "$GITHUB_TOKEN" ] && CURL_AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 
 if [ "$EUID" -ne 0 ]; then
-    echo "Please run as root (e.g., sudo bash marquee_manager.sh)"
+    echo "Please run as root (e.g., sudo -E bash marquee_manager.sh)"
     exit 1
 fi
 
@@ -22,7 +29,7 @@ INSTALL_PATH="${BASE_DIR}/marquee_manager.sh"
 BACKUP_DIR="${BASE_DIR}/backups"
 
 if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
-    curl -sSLf "${REPO_RAW_URL}/marquee_manager.sh" -o "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH"
+    curl -sSLf "${CURL_AUTH[@]}" "${REPO_RAW_URL}/marquee_manager.sh" -o "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH"
 fi
 
 echo "=================================================="
@@ -43,7 +50,7 @@ fetch_component() {
     if [ -f "${SCRIPT_DIR}/${REL_PATH}" ]; then
         cp -f "${SCRIPT_DIR}/${REL_PATH}" "$DEST_PATH"
     else
-        curl -sSLf "${REPO_RAW_URL}/${REL_PATH}" -o "$DEST_PATH" || { echo "Failed to download ${REL_PATH}"; exit 1; }
+        curl -sSLf "${CURL_AUTH[@]}" "${REPO_RAW_URL}/${REL_PATH}" -o "$DEST_PATH" || { echo "Failed to download ${REL_PATH}"; exit 1; }
     fi
 }
 
@@ -78,6 +85,9 @@ start_host_services() {
     local BIND_SCOPE="$1" ROMS_DIR="$2" THEMES_DIR="$3" STARTUP_HOOK_FILE="$4"
     fetch_component "host/host_server.py" "${BASE_DIR}/host_server.py"
     read -p "Optional Official Pixelcade Hardware IP (blank for none): " PIXELCADE_HW_IP
+    read -p "Optional RetroAchievements Username (blank for none): " RA_USER
+    RA_API_KEY=""
+    [ -n "$RA_USER" ] && read -p "RetroAchievements Web API Key: " RA_API_KEY
     [ "$BIND_SCOPE" = "local" ] && BIND_ADDR="127.0.0.1" || BIND_ADDR="0.0.0.0"
 
     cat << EOF > "${BASE_DIR}/host.conf"
@@ -86,6 +96,8 @@ ROMS_DIR="${ROMS_DIR}"
 THEMES_DIR="${THEMES_DIR}"
 BIND_ADDR="${BIND_ADDR}"
 PIXELCADE_HW_IP="${PIXELCADE_HW_IP}"
+RA_USER="${RA_USER}"
+RA_API_KEY="${RA_API_KEY}"
 EOF
     chmod 600 "${BASE_DIR}/host.conf"
 
@@ -244,6 +256,7 @@ setup_client() {
     read -p "Theme logo path [Detected: ${DEFAULT_THEME}]: " INPUT_THEME; THEME_PATH=${INPUT_THEME:-"$DEFAULT_THEME"}
     read -p "Enable .mp4 video marquees? [Y/n]: " VC; [[ "$VC" =~ ^[Nn]$ ]] && ENABLE_VIDEO="false" || ENABLE_VIDEO="true"
     read -p "Show controller overlays? [Y/n]: " CC; [[ "$CC" =~ ^[Nn]$ ]] && ENABLE_CONTROLS="false" || ENABLE_CONTROLS="true"
+    read -p "Display High Scores on Marquee? [Y/n]: " HC; [[ "$HC" =~ ^[Nn]$ ]] && ENABLE_HIGHSCORES="false" || ENABLE_HIGHSCORES="true"
     read -p "Enable Idle Attract Slideshow (5m)? [Y/n]: " AC; [[ "$AC" =~ ^[Nn]$ ]] && ATTRACT_IDLE_SEC="0" || ATTRACT_IDLE_SEC="300"
     read -p "Enable Web Dashboard & Pixelcade API (8080)? [Y/n]: " WC; [[ "$WC" =~ ^[Nn]$ ]] && ENABLE_WEB_UI="false" || ENABLE_WEB_UI="true"
     WEB_PASS_HASH=""; WEB_PASS_SALT=""
@@ -277,6 +290,7 @@ PHYS_W="${PHYS_W}"
 PHYS_H="${PHYS_H}"
 ENABLE_VIDEO="${ENABLE_VIDEO}"
 ENABLE_CONTROLS="${ENABLE_CONTROLS}"
+ENABLE_HIGHSCORES="${ENABLE_HIGHSCORES}"
 ATTRACT_IDLE_SEC="${ATTRACT_IDLE_SEC}"
 ATTRACT_INTERVAL_SEC="15"
 SLEEP_START=""

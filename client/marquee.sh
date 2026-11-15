@@ -77,7 +77,8 @@ find_media() {
 render_media() {
   local file="$1"
   local label="$2"
-  [ ! -f "$file" ] && return
+  local hiscore="$3"
+  [ ! -f "$file" ] && [ -z "$hiscore" ] && return
 
   detect_screen_res
   local TARGET_W="${PHYS_W:-$SCREEN_W}"
@@ -91,7 +92,16 @@ render_media() {
   local PREVIEW_PNG="/dev/shm/marquee_display.png"
   local FAST_BMP="/dev/shm/marquee_display.bmp"
 
-  if [[ ! "$file" =~ \.(mp4|MP4|mkv|MKV)$ ]]; then
+  # Generate dynamic scoreboard canvas if no image file exists but high score is present
+  if [ ! -f "$RENDER_FILE" ] && [ -n "$hiscore" ] && command -v convert >/dev/null 2>&1; then
+    convert -size "${TARGET_W}x${TARGET_H}" xc:black \
+      -gravity center -fill "#facc15" -pointsize 56 -annotate +0-40 "${label}" \
+      -gravity center -fill white -pointsize 48 -annotate +0+45 "${hiscore}" \
+      "$PREVIEW_PNG"
+    RENDER_FILE="$PREVIEW_PNG"
+  fi
+
+  if [[ ! "$RENDER_FILE" =~ \.(mp4|MP4|mkv|MKV)$ ]]; then
     if [[ "$RENDER_FILE" =~ \.(svg|SVG)$ ]]; then
       if command -v rsvg-convert >/dev/null 2>&1; then
         rsvg-convert -w "$TARGET_W" -h "$TARGET_H" -a "$RENDER_FILE" -o /dev/shm/svg_rendered.png
@@ -110,18 +120,26 @@ render_media() {
         STRETCH_CMD="-resize ${SCREEN_W}x${SCREEN_H}!"
       fi
 
-      if [ -n "$OVERLAY_TEXT" ]; then
-        printf '%s' "$OVERLAY_TEXT" | convert "$RENDER_FILE" -background black -gravity center -resize "$RESIZE_ARG" -extent "${TARGET_W}x${TARGET_H}" \
-          -gravity south -fill white -stroke black -strokewidth 2 -pointsize 42 -annotate +0+20 @- \
-          -write "$PREVIEW_PNG" $STRETCH_CMD "BMP3:${FAST_BMP}"
-      else
-        convert "$RENDER_FILE" -background black -gravity center -resize "$RESIZE_ARG" -extent "${TARGET_W}x${TARGET_H}" \
-          -write "$PREVIEW_PNG" $STRETCH_CMD "BMP3:${FAST_BMP}"
+      local ANNOTATE_ARGS=()
+      if [ -n "$hiscore" ]; then
+        ANNOTATE_ARGS+=(-gravity north -fill "#facc15" -stroke black -strokewidth 2 -pointsize 38 -annotate +0+16 "$hiscore")
       fi
+      if [ -n "$OVERLAY_TEXT" ]; then
+        ANNOTATE_ARGS+=(-gravity south -fill white -stroke black -strokewidth 2 -pointsize 42 -annotate +0+20 "$OVERLAY_TEXT")
+      fi
+
+      convert "$RENDER_FILE" -background black -gravity center -resize "$RESIZE_ARG" -extent "${TARGET_W}x${TARGET_H}" \
+        "${ANNOTATE_ARGS[@]}" \
+        -write "$PREVIEW_PNG" $STRETCH_CMD "BMP3:${FAST_BMP}"
       RENDER_FILE="$FAST_BMP"
     else
       cp -f "$RENDER_FILE" "$PREVIEW_PNG" 2>/dev/null
     fi
+  fi
+
+  local MPV_OSD=()
+  if [ -n "$hiscore" ]; then
+    MPV_OSD=(--osd-level=1 --osd-align-y=top --osd-font-size=36 --osd-color="#FFFACC15" --osd-msg1="$hiscore")
   fi
 
   if [ "$RENDER_BACKEND" = "window" ]; then
@@ -129,14 +147,14 @@ render_media() {
     local ASPECT_ARG=""
     [ "$SCALE_MODE" = "stretch" ] && ASPECT_ARG="--panscan=1.0 --video-aspect-override=${TARGET_W}:${TARGET_H}"
     DISPLAY="$DISPLAY_TARGET" mpv --title=marquee_player --no-border --ontop --no-osc --no-input-default-bindings \
-      --geometry="$WIN_GEOM" --image-display-duration=inf --loop-file=inf --no-audio $ASPECT_ARG "$PREVIEW_PNG" &>/dev/null &
-  elif [[ "$file" =~ \.(mp4|MP4|mkv|MKV)$ ]]; then
+      --geometry="$WIN_GEOM" --image-display-duration=inf --loop-file=inf --no-audio $ASPECT_ARG "${MPV_OSD[@]}" "$PREVIEW_PNG" &>/dev/null &
+  elif [[ "$RENDER_FILE" =~ \.(mp4|MP4|mkv|MKV)$ ]]; then
     DRM_ARG=""
     [ "$DRM_CONN" != "auto" ] && [ -n "$DRM_CONN" ] && DRM_ARG="--drm-connector=${DRM_CONN}"
     if [ "$SCALE_MODE" = "stretch" ] || [ "$TARGET_H" != "$SCREEN_H" ]; then
-      mpv --title=marquee_player --vo=drm $DRM_ARG --hwdec=auto --loop=inf --no-audio --panscan=1.0 --video-aspect-override="${SCREEN_W}:${SCREEN_H}" "$file" &>/dev/null &
+      mpv --title=marquee_player --vo=drm $DRM_ARG --hwdec=auto --loop=inf --no-audio --panscan=1.0 --video-aspect-override="${SCREEN_W}:${SCREEN_H}" "${MPV_OSD[@]}" "$RENDER_FILE" &>/dev/null &
     else
-      mpv --title=marquee_player --vo=drm $DRM_ARG --hwdec=auto --loop=inf --no-audio "$file" &>/dev/null &
+      mpv --title=marquee_player --vo=drm $DRM_ARG --hwdec=auto --loop=inf --no-audio "${MPV_OSD[@]}" "$RENDER_FILE" &>/dev/null &
     fi
   else
     fbi -d "$FB_DEV" --noverbose -T 3 "$RENDER_FILE" </dev/tty3 >/dev/null 2>&1 &
@@ -159,7 +177,7 @@ check_night_sleep() {
 }
 
 DEFAULT_MEDIA=$(find_media "${MEDIA_DIR}/custom/startup/default" "true")
-[ -n "$DEFAULT_MEDIA" ] && render_media "$DEFAULT_MEDIA" "Boot Splash"
+[ -n "$DEFAULT_MEDIA" ] && render_media "$DEFAULT_MEDIA" "Boot Splash" ""
 
 while true; do
   source "$CONF_FILE"
@@ -171,14 +189,14 @@ while true; do
   if [ -f /dev/shm/marquee_test_splash ]; then
     rm -f /dev/shm/marquee_test_splash
     SPLASH=$(find_media "${MEDIA_DIR}/custom/startup/default" "true")
-    [ -n "$SPLASH" ] && render_media "$SPLASH" "Test Splash Screen"
+    [ -n "$SPLASH" ] && render_media "$SPLASH" "Test Splash Screen" ""
   fi
   if [ -f /dev/shm/marquee_test_attract ]; then
     rm -f /dev/shm/marquee_test_attract
     SEARCH_PATH="$MEDIA_DIR"
     [ "$CLIENT_MODE" = "local" ] && [ -d "$LOCAL_ROMS" ] && SEARCH_PATH="$LOCAL_ROMS"
     RAND_IMG=$(find "$SEARCH_PATH" -type f \( -iname "*-marquee.png" -o -iname "*.jpg" -o -iname "*.png" \) ! -path "*/controls/*" 2>/dev/null | shuf -n 1)
-    [ -n "$RAND_IMG" ] && render_media "$RAND_IMG" "Attract Mode Preview"
+    [ -n "$RAND_IMG" ] && render_media "$RAND_IMG" "Attract Mode Preview" ""
   fi
 
   if check_night_sleep; then
@@ -225,6 +243,12 @@ while true; do
     URL_ROM=$(urlencode "$ROM")
     URL_SYS=$(urlencode "$SYS")
     MEDIA=""
+    HISCORE=""
+
+    if [ "${ENABLE_HIGHSCORES:-true}" = "true" ] && [ "$MODE" != "system" ] && [ "$SYS" != "system" ]; then
+      SCORE_HOST="${HOST_IP:-127.0.0.1}"
+      [ "$SCORE_HOST" != "auto" ] && [ "$SCORE_HOST" != "pixelcade" ] && HISCORE=$(curl -s -f --connect-timeout 1 "http://${SCORE_HOST}:8123/highscore/${URL_SYS}/${URL_ROM}" 2>/dev/null | tr -d '\r\n')
+    fi
 
     if [ -n "$PIXELCADE_HW_IP" ]; then
       PC_EVT="GameSelect"
@@ -300,15 +324,22 @@ while true; do
         fi
       fi
     fi
-    [ -z "$MEDIA" ] && MEDIA=$(find_media "${MEDIA_DIR}/custom/startup/default" "true")
-    [ -n "$MEDIA" ] && render_media "$MEDIA" "${SYS} / ${ROM}"
+
+    # Only fall back to default boot splash if there is neither game art nor a high score to show
+    if [ -z "$MEDIA" ] && [ -z "$HISCORE" ]; then
+      MEDIA=$(find_media "${MEDIA_DIR}/custom/startup/default" "true")
+    fi
+
+    if [ -n "$MEDIA" ] || [ -n "$HISCORE" ]; then
+      render_media "$MEDIA" "${SYS} / ${ROM}" "$HISCORE"
+    fi
   elif [ "${ATTRACT_IDLE_SEC:-0}" -gt 0 ] && [ $((NOW_SEC - LAST_ACTIVITY)) -ge "$ATTRACT_IDLE_SEC" ]; then
     if [ $((NOW_SEC - LAST_ATTRACT)) -ge "${ATTRACT_INTERVAL_SEC:-15}" ]; then
       LAST_ATTRACT=$NOW_SEC
       SEARCH_PATH="$MEDIA_DIR"
       [ "$CLIENT_MODE" = "local" ] && [ -d "$LOCAL_ROMS" ] && SEARCH_PATH="$LOCAL_ROMS"
       RAND_IMG=$(find "$SEARCH_PATH" -type f \( -iname "*-marquee.png" -o -iname "*.jpg" -o -iname "*.png" \) ! -path "*/controls/*" 2>/dev/null | shuf -n 1)
-      [ -n "$RAND_IMG" ] && render_media "$RAND_IMG" "Attract Mode"
+      [ -n "$RAND_IMG" ] && render_media "$RAND_IMG" "Attract Mode" ""
     fi
   fi
   sleep 0.2
