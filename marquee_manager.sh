@@ -193,6 +193,7 @@ setup_client() {
     install_missing_linux_deps
     fetch_component "client/marquee.sh" "${BASE_DIR}/marquee.sh"
     fetch_component "client/web_ui.py" "${BASE_DIR}/web_ui.py"
+    fetch_component "client/hotkey_listener.py" "${BASE_DIR}/hotkey_listener.py"
     chmod +x "${BASE_DIR}/marquee.sh"
     EXISTING_PC_IP=""
     [ -f "${BASE_DIR}/host.conf" ] && EXISTING_PC_IP=$(grep '^PIXELCADE_HW_IP=' "${BASE_DIR}/host.conf" | cut -d'=' -f2 | tr -d '"')
@@ -269,7 +270,7 @@ setup_client() {
     fi
     read -p "Optional custom banner text overlay: " OVERLAY_TEXT
     MEDIA_DIR="${BASE_DIR}/marquees"
-    mkdir -p "${MEDIA_DIR}/custom/startup" "${MEDIA_DIR}/custom/systems" "${MEDIA_DIR}/custom/controls" "${MEDIA_DIR}/systems"
+    mkdir -p "${MEDIA_DIR}/custom/startup" "${MEDIA_DIR}/custom/systems" "${MEDIA_DIR}/custom/controls" "${MEDIA_DIR}/custom/effects" "${MEDIA_DIR}/systems"
     cat << EOF > "${BASE_DIR}/marquee.conf"
 CLIENT_MODE="${CLIENT_MODE}"
 MARQUEE_MODE="${MARQUEE_MODE}"
@@ -299,6 +300,7 @@ ENABLE_WEB_UI="${ENABLE_WEB_UI}"
 WEB_PASS_SALT="${WEB_PASS_SALT}"
 WEB_PASS_HASH="${WEB_PASS_HASH}"
 OVERLAY_TEXT="${OVERLAY_TEXT}"
+OVERLAY_EFFECT="none"
 EOF
     chmod 600 "${BASE_DIR}/marquee.conf"
     if [ "$CLIENT_MODE" = "network" ] && [ "$HOST_IP" != "auto" ] && [ "$HOST_IP" != "pixelcade" ]; then
@@ -337,6 +339,7 @@ case "$ACTION" in
         fetch_component "marquee_manager.sh" "${INSTALL_PATH}.tmp" && mv "${INSTALL_PATH}.tmp" "$INSTALL_PATH" && chmod +x "$INSTALL_PATH"
         [ -f "${BASE_DIR}/marquee.sh" ] && fetch_component "client/marquee.sh" "${BASE_DIR}/marquee.sh" && chmod +x "${BASE_DIR}/marquee.sh"
         [ -f "${BASE_DIR}/web_ui.py" ] && fetch_component "client/web_ui.py" "${BASE_DIR}/web_ui.py"
+        [ -f "${BASE_DIR}/hotkey_listener.py" ] && fetch_component "client/hotkey_listener.py" "${BASE_DIR}/hotkey_listener.py"
         [ -f "${BASE_DIR}/host_server.py" ] && fetch_component "host/host_server.py" "${BASE_DIR}/host_server.py"
         touch /dev/shm/marquee_force_refresh && exec "$INSTALL_PATH" ;;
     2)
@@ -352,14 +355,14 @@ case "$ACTION" in
         read -p "Restore complete! Press Enter to reboot..." && reboot; exit 0 ;;
     4)
         read -p "Uninstall all marquee scripts? [y/N]: " CONFIRM; [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && exit 0
-        pkill -f "host_server.py|web_ui.py|marquee.sh|mpv.marquee_player" 2>/dev/null; killall fbi 2>/dev/null
+        pkill -f "host_server.py|web_ui.py|hotkey_listener.py|marquee.sh|mpv.marquee_player" 2>/dev/null; killall fbi 2>/dev/null
         command -v systemctl >/dev/null 2>&1 && systemctl disable --now arcade-marquee.service arcade-marquee-host.service 2>/dev/null && rm -f /etc/systemd/system/arcade-marquee.service && systemctl daemon-reload
         for SR in /userdata/system /recalbox/share/system /storage/.config; do
             [ -d "$SR" ] && rm -f "${SR}/configs/emulationstation/scripts/"*/marquee.sh "${SR}/emulationstation/scripts/"*/marquee.sh 2>/dev/null
             for SF in "${SR}/custom.sh" "${SR}/autostart.sh"; do [ -f "$SF" ] && sed -i '/# Arcade Marquee/d;/host_server.py/d;/marquee.sh/d' "$SF"; done
         done
         read -p "Also delete artwork in ${BASE_DIR}/marquees? [y/N]: " DEL_IMG; [[ "$DEL_IMG" =~ ^[Yy]$ ]] && rm -rf "${BASE_DIR}/marquees"
-        rm -f "${BASE_DIR}/marquee.sh" "${BASE_DIR}/marquee.conf" "${BASE_DIR}/host.conf" "${BASE_DIR}/web_ui.py" "${BASE_DIR}/host_server.py" "${BASE_DIR}/current_game.txt" "${BASE_DIR}/theme_path.txt" "${BASE_DIR}/marquees.tar.gz"
+        rm -f "${BASE_DIR}/marquee.sh" "${BASE_DIR}/marquee.conf" "${BASE_DIR}/host.conf" "${BASE_DIR}/web_ui.py" "${BASE_DIR}/hotkey_listener.py" "${BASE_DIR}/host_server.py" "${BASE_DIR}/current_game.txt" "${BASE_DIR}/theme_path.txt" "${BASE_DIR}/marquees.tar.gz"
         read -p "Reverted to stock. Press Enter to reboot..." && reboot; exit 0 ;;
     1)
         echo "1) Arcade Host Only  2) Network Marquee Client Only  3) Standalone All-in-One"

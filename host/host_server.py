@@ -1,10 +1,17 @@
 import json, os, re, socket, subprocess, threading, time, urllib.parse, urllib.request
+import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONF_PATH = os.path.join(BASE_DIR, "host.conf")
 SCORES_PATH = os.path.join(BASE_DIR, "highscores.json")
 RA_CACHE_PATH = os.path.join(BASE_DIR, "ra_cache.json")
+
+ROM_EXTS = {
+    ".zip", ".7z", ".nes", ".sfc", ".smc", ".md", ".bin", ".gen", ".gba",
+    ".gb", ".gbc", ".n64", ".z64", ".v64", ".iso", ".cue", ".chd", ".pbp",
+    ".cso", ".nds", ".3ds", ".gcm", ".rvz", ".wbfs", ".xci", ".nsp", ".dsk", ".tap"
+}
 
 def read_host_conf():
     cfg = {
@@ -19,6 +26,49 @@ def read_host_conf():
                     k, v = line.strip().split("=", 1)
                     cfg[k] = v.strip('"')
     return cfg
+
+def build_rom_catalog(roms_dir):
+    catalog = {}
+    if not roms_dir or not os.path.isdir(roms_dir):
+        return catalog
+    for sys_name in sorted(os.listdir(roms_dir)):
+        sys_path = os.path.join(roms_dir, sys_name)
+        if not os.path.isdir(sys_path) or sys_name.startswith("."):
+            continue
+        names_map = {}
+        gamelist_path = os.path.join(sys_path, "gamelist.xml")
+        if os.path.isfile(gamelist_path):
+            try:
+                tree = ET.parse(gamelist_path)
+                for game in tree.getroot().findall("game"):
+                    p_el = game.find("path")
+                    n_el = game.find("name")
+                    if p_el is not None and p_el.text:
+                        rom_base = os.path.splitext(os.path.basename(p_el.text.strip()))[0]
+                        title = n_el.text.strip() if (n_el is not None and n_el.text) else rom_base
+                        names_map[rom_base] = title
+            except Exception:
+                pass
+        games = []
+        seen = set()
+        try:
+            for entry in sorted(os.listdir(sys_path)):
+                full_entry = os.path.join(sys_path, entry)
+                if os.path.isdir(full_entry):
+                    continue
+                base, ext = os.path.splitext(entry)
+                if ext.lower() in ROM_EXTS and base not in seen:
+                    seen.add(base)
+                    games.append({"rom": base, "name": names_map.get(base, base)})
+        except Exception:
+            pass
+        if games or names_map:
+            if not games:
+                games = [{"rom": k, "name": v} for k, v in sorted(names_map.items(), key=lambda x: x[1].lower())]
+            else:
+                games.sort(key=lambda x: x["name"].lower())
+            catalog[sys_name] = games
+    return catalog
 
 def safe_join(root_dir, rel_path):
     if not root_dir:
@@ -55,7 +105,6 @@ def get_mame_hiscore(sys_name, rom_name, roms_dir):
     hi_file = next((p for p in hi_candidates if os.path.isfile(p)), None)
     if not hi_file:
         return ""
-    # Use hitotext if available on system PATH
     for bin_path in ("/usr/bin/hitotext", "/usr/local/bin/hitotext", os.path.join(BASE_DIR, "hitotext")):
         if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
             try:
@@ -79,7 +128,6 @@ def get_ra_score(sys_name, rom_name, cfg):
     now = time.time()
     if cache_key in cache and (now - cache[cache_key].get("ts", 0)) < 3600:
         return cache[cache_key].get("score", "")
-    # Check RetroArch local achievement cache/logs if present
     ra_log_dirs = ["/userdata/system/configs/retroarch/logs", "/opt/retropie/configs/all/retroarch/logs"]
     game_id = ""
     for d in ra_log_dirs:
@@ -130,6 +178,15 @@ class ConsolidatedHostHandler(BaseHTTPRequestHandler):
         cfg = read_host_conf()
         clean_path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         target_file = None
+
+        if clean_path == "/catalog":
+            payload = json.dumps(build_rom_catalog(cfg.get("ROMS_DIR", ""))).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
 
         if clean_path.startswith("/highscore/"):
             parts = clean_path.strip("/").split("/")
